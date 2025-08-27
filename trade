@@ -1,0 +1,6 @@
+git init
+git add .
+git commit -m "Initial commit - daytrade app"
+git branch -M main
+git remote add origin https://github.com/<ton-user>/<daytrade-app>.git
+git push -u origin main
