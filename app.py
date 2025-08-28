@@ -229,7 +229,7 @@ with tab_scr:
             else:
                 st.info("Aucun symbole ne passe les filtres.")
 
-    # ---- Screener Crypto (TOUJOURS retourne un Top N) ----
+   # ---- Screener Crypto (TOUJOURS retourne un Top N) ----
 else:
     sc = cfg.get("screener_crypto", {})
     scrc_tickers = st.multiselect("Tickers (crypto)", sc.get("tickers", []), default=sc.get("tickers", []), key="scr_cr_tickers")
