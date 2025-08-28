@@ -230,44 +230,87 @@ with tab_scr:
                 st.info("Aucun symbole ne passe les filtres.")
 
     else:
-        sc = cfg.get("screener_crypto", {})
-        scrc_tickers = st.multiselect("Tickers (crypto)", sc.get("tickers", []), default=sc.get("tickers", []), key="scr_cr_tickers")
-        scrc_interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m","5m"], index=0, key="scr_cr_interval")
-        scrc_lookback = st.slider("Lookback (jours)", 60, 365, sc.get("lookback_days", 120), key="scr_cr_lookback")
-        scrc_topn = st.number_input("Top N", 1, 50, sc.get("top_n", 10), key="scr_cr_topn")
-        scrc_weights = sc.get("score_weights", {'momentum':0.55,'volatility':0.25,'liquidity':0.15,'trend_quality':0.05})
-        scrc_pot_method = st.selectbox("Méthode gain potentiel", ["atr_target","recent_high"], index=0, key="scr_cr_potm")
-        scrc_atr_mult_tgt = st.number_input("ATR × (objectif)", value=float(sc.get("atr_mult_target", 3.0)), key="scr_cr_atr_tgt")
-        if st.button("Lancer le screener (crypto)", key="scr_cr_run") and scrc_tickers:
-            rows = []
-            for sym in scrc_tickers:
-                df = fetch_single(sym, period_days=max(scrc_lookback+80, 220), interval=scrc_interval)
-                if df.empty:
-                    continue
-                close = s_close(df)
-                if len(close) < 60 or close.isna().all():
-                    continue
-                mom = float((close.iloc[-1] - close.iloc[-21]) / close.iloc[-21]) if pd.notna(close.iloc[-21]) and close.iloc[-21] != 0 else 0.0
-                atr_s = atr(df, 14)
-                atr_pct = float((atr_s.iloc[-1] / close.iloc[-1])) if pd.notna(close.iloc[-1]) and close.iloc[-1] != 0 else 0.0
-                avg_dvol = safe_avg_dollar_volume(df, 30)
-                e20, e50, e200 = ema(close,20).iloc[-1], ema(close,50).iloc[-1], ema(close,200).iloc[-1]
-                tq = 1.0 if (e20>e50>e200) else (0.5 if (e20>e50 or e50>e200) else 0.0)
-                potential = float(scrc_atr_mult_tgt * atr_s.iloc[-1]) if scrc_pot_method=="atr_target" else float(max(0.0, close.iloc[-60:].max() - close.iloc[-1]))
-                mom_n = float(np.clip(mom, -0.5, 0.5))
-                vol_n = float(np.clip(atr_pct, 0.0, 0.35))
-                liq_n = float(np.log10(max(avg_dvol, 1.0))/8.0)
-                score = scrc_weights['momentum']*mom_n + scrc_weights['volatility']*vol_n + scrc_weights['liquidity']*liq_n + scrc_weights['trend_quality']*tq
-                rows.append({
-                    "symbol": sym, "price": float(close.iloc[-1]), "score": score, "momentum_21d": mom, "atr_pct": atr_pct,
-                    "avg_dollar_volume": avg_dvol, "trend_quality": tq, "potential_gain_$": potential,
-                    "ema20": e20, "ema50": e50, "ema200": e200
-                })
-            if rows:
-                out = pd.DataFrame(rows).sort_values("score", ascending=False).head(int(scrc_topn))
-                st.dataframe(out, use_container_width=True)
+        # ---- Screener Crypto (patché pour tolérer Volume manquant) ----
+    sc = cfg.get("screener_crypto", {})
+    scrc_tickers = st.multiselect("Tickers (crypto)", sc.get("tickers", []), default=sc.get("tickers", []), key="scr_cr_tickers")
+    scrc_interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m","5m"], index=0, key="scr_cr_interval")
+    scrc_lookback = st.slider("Lookback (jours)", 60, 365, sc.get("lookback_days", 120), key="scr_cr_lookback")
+    scrc_topn = st.number_input("Top N", 1, 50, sc.get("top_n", 10), key="scr_cr_topn")
+    scrc_weights = sc.get("score_weights", {'momentum':0.55,'volatility':0.25,'liquidity':0.15,'trend_quality':0.05})
+    scrc_pot_method = st.selectbox("Méthode gain potentiel", ["atr_target","recent_high"], index=0, key="scr_cr_potm")
+    scrc_atr_mult_tgt = st.number_input("ATR × (objectif)", value=float(sc.get("atr_mult_target", 3.0)), key="scr_cr_atr_tgt")
+
+    # 👉 nouvelle option pour bypass liquide si Volume cryptos = 0
+    scrc_ignore_liquidity = st.checkbox("Ignorer la liquidité (si Volume=0 sur yfinance)", value=True, key="scr_cr_ignoreliq")
+
+    if st.button("Lancer le screener (crypto)", key="scr_cr_run") and scrc_tickers:
+        rows = []
+        for sym in scrc_tickers:
+            df = fetch_single(sym, period_days=max(scrc_lookback+80, 220), interval=scrc_interval)
+            if df.empty:
+                continue
+
+            close = s_close(df)
+            if len(close) < 60 or close.isna().all():
+                continue
+
+            # Indicateurs
+            atr_s = atr(df, 14)
+            mom = float((close.iloc[-1] - close.iloc[-21]) / close.iloc[-21]) if pd.notna(close.iloc[-21]) and close.iloc[-21] != 0 else 0.0
+            atr_last = float(atr_s.iloc[-1]) if not atr_s.isna().all() else 0.0
+            price_last = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else 0.0
+            atr_pct = float(atr_last / price_last) if price_last > 0 else 0.0
+
+            # ⚠️ yfinance renvoie souvent Volume=0 pour certaines cryptos
+            avg_dvol = 0.0
+            vol_series = s_volume(df).tail(30)
+            if not vol_series.isna().all() and vol_series.sum() > 0 and price_last > 0:
+                avg_dvol = float((close.tail(30) * vol_series).dropna().mean() or 0.0)
+
+            # EMAs & trend quality
+            e20, e50, e200 = ema(close,20).iloc[-1], ema(close,50).iloc[-1], ema(close,200).iloc[-1]
+            tq = 1.0 if (e20>e50>e200) else (0.5 if (e20>e50 or e50>e200) else 0.0)
+
+            # Potential gain
+            if scrc_pot_method == "atr_target":
+                potential = float(scrc_atr_mult_tgt * atr_last)
             else:
-                st.info("Aucune crypto ne passe les filtres.")
+                recent_high = float(close.iloc[-60:].max()) if len(close) >= 60 else price_last
+                potential = float(max(0.0, recent_high - price_last))
+
+            # Normalisations (avec fallback si volume nul)
+            mom_n = float(np.clip(mom, -0.8, 0.8))
+            vol_n = float(np.clip(atr_pct, 0.0, 0.5))  # la vraie “volatilité”
+            if scrc_ignore_liquidity or avg_dvol <= 0:
+                # Fallback: utilise la volatilité comme proxy de "liquidité" (au moins, on ne bloque pas tout)
+                liq_n = float(np.clip(vol_n * 2.0, 0.0, 1.0))
+            else:
+                liq_n = float(np.log10(max(avg_dvol, 1.0)) / 8.0)
+
+            score = (
+                scrc_weights['momentum'] * mom_n +
+                scrc_weights['volatility'] * vol_n +
+                scrc_weights['liquidity'] * liq_n +
+                scrc_weights['trend_quality'] * tq
+            )
+
+            rows.append({
+                "symbol": sym,
+                "price": price_last,
+                "score": score,
+                "momentum_21d": mom,
+                "atr_pct": atr_pct,
+                "avg_dollar_volume": avg_dvol,
+                "trend_quality": tq,
+                "potential_gain_$": potential,
+                "ema20": e20, "ema50": e50, "ema200": e200
+            })
+
+        if rows:
+            out = pd.DataFrame(rows).sort_values("score", ascending=False).head(int(scrc_topn))
+            st.dataframe(out, use_container_width=True)
+        else:
+            st.info("Aucune crypto ne passe les filtres même avec la tolérance — essaie d’augmenter le Lookback ou de changer l’intervalle.")
 
 # ------------------ Backtest ------------------
 with tab_bt:
