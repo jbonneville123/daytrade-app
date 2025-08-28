@@ -229,165 +229,110 @@ with tab_scr:
             else:
                 st.info("Aucun symbole ne passe les filtres.")
 
-    else:
-        # ---- Screener Crypto (patché pour tolérer Volume manquant) ----
+    # ---- Screener Crypto (TOUJOURS retourne un Top N) ----
+else:
     sc = cfg.get("screener_crypto", {})
     scrc_tickers = st.multiselect("Tickers (crypto)", sc.get("tickers", []), default=sc.get("tickers", []), key="scr_cr_tickers")
     scrc_interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m","5m"], index=0, key="scr_cr_interval")
-    scrc_lookback = st.slider("Lookback (jours)", 60, 365, sc.get("lookback_days", 120), key="scr_cr_lookback")
+    scrc_lookback = st.slider("Lookback (jours)", 30, 365, max(30, sc.get("lookback_days", 120)), key="scr_cr_lookback")
     scrc_topn = st.number_input("Top N", 1, 50, sc.get("top_n", 10), key="scr_cr_topn")
     scrc_weights = sc.get("score_weights", {'momentum':0.55,'volatility':0.25,'liquidity':0.15,'trend_quality':0.05})
     scrc_pot_method = st.selectbox("Méthode gain potentiel", ["atr_target","recent_high"], index=0, key="scr_cr_potm")
     scrc_atr_mult_tgt = st.number_input("ATR × (objectif)", value=float(sc.get("atr_mult_target", 3.0)), key="scr_cr_atr_tgt")
 
-    # 👉 nouvelle option pour bypass liquide si Volume cryptos = 0
+    # Options de tolérance
     scrc_ignore_liquidity = st.checkbox("Ignorer la liquidité (si Volume=0 sur yfinance)", value=True, key="scr_cr_ignoreliq")
+    scrc_force_results = st.checkbox("Forcer un Top N (désactiver la plupart des filtres)", value=True, key="scr_cr_force")
 
     if st.button("Lancer le screener (crypto)", key="scr_cr_run") and scrc_tickers:
         rows = []
         for sym in scrc_tickers:
-            df = fetch_single(sym, period_days=max(scrc_lookback+80, 220), interval=scrc_interval)
+            df = fetch_single(sym, period_days=max(scrc_lookback+20, 80), interval=scrc_interval)
             if df.empty:
+                # En mode forcé, on garde quand même une ligne placeholder (score très faible)
+                if scrc_force_results:
+                    rows.append({"symbol": sym, "price": 0.0, "score": -1e9, "momentum_21d": 0.0,
+                                 "atr_pct": 0.0, "avg_dollar_volume": 0.0, "trend_quality": 0.0,
+                                 "potential_gain_$": 0.0, "ema20": np.nan, "ema50": np.nan, "ema200": np.nan})
                 continue
 
             close = s_close(df)
-            if len(close) < 60 or close.isna().all():
-                continue
+            price_last = float(close.iloc[-1]) if len(close) and pd.notna(close.iloc[-1]) else 0.0
 
-            # Indicateurs
+            # Fenêtres adaptatives: on prend ce qu’on a
+            n = len(close)
+            mom_window = 21 if n > 21 else (n-1 if n >= 5 else 0)
+            if mom_window > 0 and close.iloc[-mom_window] not in (0, np.nan):
+                mom = float((close.iloc[-1] - close.iloc[-mom_window]) / close.iloc[-mom_window])
+            else:
+                mom = 0.0
+
+            # ATR et volatilité %
             atr_s = atr(df, 14)
-            mom = float((close.iloc[-1] - close.iloc[-21]) / close.iloc[-21]) if pd.notna(close.iloc[-21]) and close.iloc[-21] != 0 else 0.0
-            atr_last = float(atr_s.iloc[-1]) if not atr_s.isna().all() else 0.0
-            price_last = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else 0.0
+            atr_last = float(atr_s.iloc[-1]) if len(atr_s) and pd.notna(atr_s.iloc[-1]) else 0.0
             atr_pct = float(atr_last / price_last) if price_last > 0 else 0.0
 
-            # ⚠️ yfinance renvoie souvent Volume=0 pour certaines cryptos
-            avg_dvol = 0.0
-            vol_series = s_volume(df).tail(30)
-            if not vol_series.isna().all() and vol_series.sum() > 0 and price_last > 0:
-                avg_dvol = float((close.tail(30) * vol_series).dropna().mean() or 0.0)
+            # Liquidité: si Volume inutilisable, proxy via volatilité
+            vol_last30 = s_volume(df).tail(30)
+            if not vol_last30.isna().all() and vol_last30.sum() > 0 and price_last > 0:
+                avg_dvol = float((close.tail(30) * vol_last30).dropna().mean() or 0.0)
+                liq_n = float(np.log10(max(avg_dvol, 1.0)) / 8.0)
+            else:
+                avg_dvol = 0.0
+                liq_n = float(np.clip(atr_pct * 2.0, 0.0, 1.0)) if scrc_ignore_liquidity else 0.0
 
-            # EMAs & trend quality
-            e20, e50, e200 = ema(close,20).iloc[-1], ema(close,50).iloc[-1], ema(close,200).iloc[-1]
-            tq = 1.0 if (e20>e50>e200) else (0.5 if (e20>e50 or e50>e200) else 0.0)
+            # EMAs et trend quality
+            e20  = float(ema(close, 20).iloc[-1])  if n >= 20 else np.nan
+            e50  = float(ema(close, 50).iloc[-1])  if n >= 50 else np.nan
+            e200 = float(ema(close, 200).iloc[-1]) if n >= 200 else np.nan
+            if not np.isnan(e20) and not np.isnan(e50) and not np.isnan(e200):
+                tq = 1.0 if (e20 > e50 > e200) else (0.5 if (e20 > e50 or e50 > e200) else 0.0)
+            elif not np.isnan(e20) and not np.isnan(e50):
+                tq = 0.7 if e20 > e50 else 0.3
+            else:
+                tq = 0.5  # défaut neutre en mode forcé
 
-            # Potential gain
+            # Gain potentiel
             if scrc_pot_method == "atr_target":
                 potential = float(scrc_atr_mult_tgt * atr_last)
             else:
-                recent_high = float(close.iloc[-60:].max()) if len(close) >= 60 else price_last
+                look = close.iloc[-min(60, n):]
+                recent_high = float(look.max()) if len(look) else price_last
                 potential = float(max(0.0, recent_high - price_last))
 
-            # Normalisations (avec fallback si volume nul)
-            mom_n = float(np.clip(mom, -0.8, 0.8))
-            vol_n = float(np.clip(atr_pct, 0.0, 0.5))  # la vraie “volatilité”
-            if scrc_ignore_liquidity or avg_dvol <= 0:
-                # Fallback: utilise la volatilité comme proxy de "liquidité" (au moins, on ne bloque pas tout)
-                liq_n = float(np.clip(vol_n * 2.0, 0.0, 1.0))
-            else:
-                liq_n = float(np.log10(max(avg_dvol, 1.0)) / 8.0)
+            # Normalisations robustes
+            mom_n = float(np.clip(mom, -1.0, 1.0))
+            vol_n = float(np.clip(atr_pct, 0.0, 0.8))
 
             score = (
-                scrc_weights['momentum'] * mom_n +
-                scrc_weights['volatility'] * vol_n +
-                scrc_weights['liquidity'] * liq_n +
+                scrc_weights['momentum']      * mom_n +
+                scrc_weights['volatility']    * vol_n +
+                scrc_weights['liquidity']     * liq_n +
                 scrc_weights['trend_quality'] * tq
             )
 
-            rows.append({
-                "symbol": sym,
-                "price": price_last,
-                "score": score,
-                "momentum_21d": mom,
-                "atr_pct": atr_pct,
-                "avg_dollar_volume": avg_dvol,
-                "trend_quality": tq,
-                "potential_gain_$": potential,
-                "ema20": e20, "ema50": e50, "ema200": e200
-            })
+            # En mode strict OFF (forcé), on n’exclut personne ; en mode strict ON, on peut filtrer un peu
+            if scrc_force_results:
+                rows.append({
+                    "symbol": sym, "price": price_last, "score": score, "momentum_21d": mom,
+                    "atr_pct": atr_pct, "avg_dollar_volume": avg_dvol, "trend_quality": tq,
+                    "potential_gain_$": potential, "ema20": e20, "ema50": e50, "ema200": e200
+                })
+            else:
+                # filtres doux (ex: prix positif)
+                if price_last > 0:
+                    rows.append({
+                        "symbol": sym, "price": price_last, "score": score, "momentum_21d": mom,
+                        "atr_pct": atr_pct, "avg_dollar_volume": avg_dvol, "trend_quality": tq,
+                        "potential_gain_$": potential, "ema20": e20, "ema50": e50, "ema200": e200
+                    })
 
         if rows:
             out = pd.DataFrame(rows).sort_values("score", ascending=False).head(int(scrc_topn))
             st.dataframe(out, use_container_width=True)
         else:
-            st.info("Aucune crypto ne passe les filtres même avec la tolérance — essaie d’augmenter le Lookback ou de changer l’intervalle.")
-
-# ------------------ Backtest ------------------
-with tab_bt:
-    st.subheader("Backtest ORB + EMA20 + VWAP + Stop ATR (simplifié)")
-    bcfg = cfg.get("backtest", {})
-    bt_tickers = st.multiselect("Tickers à backtester", bcfg.get("tickers", []), default=bcfg.get("tickers", []), key="bt_tickers")
-    bt_interval = st.selectbox("Intervalle", ["5m","15m","30m","1h"], index=0, key="bt_interval")
-    bt_lookback_days = st.slider("Historique (jours)", 5, 30, bcfg.get("lookback_days", 10), key="bt_lookback")
-    bt_or_minutes = st.slider("Opening Range (minutes)", 5, 30, bcfg.get("or_minutes", 15), key="bt_or")
-    bt_ema_p = st.number_input("EMA period", value=int(bcfg.get("ema_period", 20)), key="bt_ema")
-    bt_atr_p = st.number_input("ATR period", value=int(bcfg.get("atr_period", 14)), key="bt_atr")
-    bt_atr_mult = st.number_input("ATR × (stop)", value=float(bcfg.get("atr_mult", 2.0)), key="bt_atr_mult")
-    bt_allow_short = st.checkbox("Autoriser short", value=bool(bcfg.get("allow_short", True)), key="bt_short")
-    bt_end_liq = st.text_input("Liquidation (HH:MM)", bcfg.get("end_liquidate", "15:55"), key="bt_liq")
-    bt_capital = st.number_input("Capital de départ", value=100000.0, key="bt_cap")
-    bt_rpt = st.number_input("Risque par trade (ex: 0.005 = 0.5%)", value=0.005, key="bt_rpt")
-
-    def position_size(cap, entry, stop, rpt):
-        if entry is None or stop is None or entry <= 0:
-            return 0
-        rps = abs(entry - stop)
-        if rps <= 0:
-            return 0
-        return int((cap * rpt) // rps)
-
-    if st.button("Lancer le backtest", key="bt_run") and bt_tickers:
-        results = []
-        for sym in bt_tickers:
-            df = fetch_single(sym, period_days=bt_lookback_days, interval=bt_interval)
-            if df.empty:
-                continue
-            sig = generate_signals(df, ema_period=bt_ema_p, atr_period=bt_atr_p, atr_mult=bt_atr_mult, or_minutes=bt_or_minutes, allow_short=bt_allow_short)
-
-            pnl = 0.0
-            trades = 0
-            h, m = map(int, bt_end_liq.split(":"))
-            end_t = time(hour=h, minute=m)
-            for session, g in sig.groupby("session"):
-                rows = g[g["entry"].notna()]
-                if rows.empty:
-                    continue
-                entry_ts = rows.index[0]
-                direction = rows.iloc[0]["direction"]
-                entry = rows.iloc[0]["entry"]
-                stop = rows.iloc[0]["stop"]
-                qty = position_size(bt_capital, entry, stop, bt_rpt)
-                if qty <= 0:
-                    continue
-                trades += 1
-                exited = False
-                for ts, row in g.loc[g.index >= entry_ts].iterrows():
-                    if ts.time() >= end_t:
-                        price = row["Close"]
-                        pnl += (price - entry) * qty if direction == "long" else (entry - price) * qty
-                        exited = True
-                        break
-                    if direction == "long":
-                        if row["Low"] <= stop:
-                            pnl += (stop - entry) * qty
-                            exited = True
-                            break
-                    else:
-                        if row["High"] >= stop:
-                            pnl += (entry - stop) * qty
-                            exited = True
-                            break
-                    a = row["ATR"]
-                    stop = max(stop, row["Close"] - bt_atr_mult * a) if direction == "long" else min(stop, row["Close"] + bt_atr_mult * a)
-                if not exited:
-                    last = g.iloc[-1]["Close"]
-                    pnl += (last - entry) * qty if direction == "long" else (entry - last) * qty
-            results.append({"symbol": sym, "trades": trades, "pnl": float(pnl)})
-        if results:
-            st.dataframe(pd.DataFrame(results).sort_values("pnl", ascending=False), use_container_width=True)
-        else:
-            st.info("Pas de résultats sur cette période.")
-
+            st.info("Aucune crypto renvoyée — ajoute des tickers, augmente le lookback, ou active 'Forcer un Top N'.")
+    
 # ------------------ Live ------------------
 with tab_live:
     st.subheader("Live (simulation) — aperçu des signaux intraday")
