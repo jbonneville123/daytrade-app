@@ -1,58 +1,15 @@
-timezone: America/New_York
 screener_equities:
-  tickers:
-  - AAPL
-  - MSFT
-  - TSLA
-  - NVDA
-  - AMD
-  - META
-  - AMZN
-  - GOOGL
-  - SMCI
-  - NFLX
-  interval: 1d
+  tickers: ["AAPL","MSFT","TSLA","NVDA","AMD","META","AMZN","GOOGL","SMCI","NFLX"]
   lookback_days: 120
   min_price: 3
   min_avg_volume: 1000000
   top_n: 10
-  score_weights:
-    momentum: 0.5
-    volatility: 0.2
-    liquidity: 0.2
-    trend_quality: 0.1
-  potential_gain_method: atr_target
+  score_weights: {"momentum":0.5,"volatility":0.2,"liquidity":0.2,"trend_quality":0.1}
   atr_mult_target: 2.5
+
 screener_crypto:
-  tickers:
-  - BTC-USD
-  - ETH-USD
-  - SOL-USD
-  - AVAX-USD
-  - DOGE-USD
-  - XRP-USD
-  interval: 1d
+  tickers: ["BTC-USD","ETH-USD","SOL-USD","AVAX-USD","DOGE-USD","XRP-USD"]
   lookback_days: 120
   top_n: 10
-  score_weights:
-    momentum: 0.55
-    volatility: 0.25
-    liquidity: 0.15
-    trend_quality: 0.05
-  potential_gain_method: atr_target
+  score_weights: {"momentum":0.55,"volatility":0.25,"liquidity":0.15,"trend_quality":0.05}
   atr_mult_target: 3.0
-backtest:
-  tickers:
-  - AAPL
-  - MSFT
-  - TSLA
-  interval: 5m
-  lookback_days: 10
-  or_minutes: 15
-  ema_period: 20
-  atr_period: 14
-  atr_mult: 2.0
-  allow_short: true
-  end_liquidate: '15:55'
-  starting_capital: 100000
-  risk_per_trade: 0.005
