@@ -669,12 +669,3 @@ with tab_ai:
 with tab_diag:
     st.subheader("🛠️ Astuce & limite Yahoo")
     st.markdown("""
-- Sur des **intervalles fins** (5m, 15m, 30m…), Yahoo limite la période. L’app **baisse automatiquement l’intervalle** si besoin.
-- Barre latérale → **Mode de données** :
-  - `real_or_fallback` : essaye Yahoo, sinon **données synthétiques**
-  - `real_only` : uniquement Yahoo (peut renvoyer vide)
-  - `fallback_only` : uniquement synthétique (utile pour tester l’app hors-ligne)
-- L’onglet **🤖 AI Signals** et le **Live** utilisent un petit modèle de régression logistique (numpy) pour estimer **P(up)** au prochain bar. 
-  - Si l’historique est trop court, un **mode règles** calcule une proba simple basée sur EMA/RSI/MACD/Breakout.
-  - Utilise une gestion du risque stricte. Ceci n’est **pas** un conseil d’investissement.
-""")
