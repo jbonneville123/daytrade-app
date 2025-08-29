@@ -668,4 +668,4 @@ with tab_ai:
 # -------- Diagnostics --------
 with tab_diag:
     st.subheader("🛠️ Astuce & limite Yahoo")
-    st.markdown("""
+    st.markdown
