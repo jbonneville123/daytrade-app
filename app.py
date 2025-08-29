@@ -1,5 +1,4 @@
-
-# app.py — DayTrade App Pro (All-in-One, YF Strong + AI Signals + Live AI + Auto-refresh)
+# app.py — DayTrade App Pro (All-in-One, YF Strong + AI Live) — Keys patched
 import os, time, math
 import streamlit as st
 import pandas as pd
@@ -212,88 +211,6 @@ def fetch(symbol:str, interval:str, lookback_days:int, mode:str="real_or_fallbac
             log.append("real_only → no data")
     return df, used_int, log
 
-# ===================== AI model utils (numpy-like) =====================
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    d = series.diff()
-    up = d.clip(lower=0); down = -d.clip(upper=0)
-    ma_up = up.ewm(alpha=1/period, adjust=False).mean()
-    ma_down = down.ewm(alpha=1/period, adjust=False).mean()
-    rs = ma_up / ma_down.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
-
-def macd(series: pd.Series, fast=12, slow=26, signal=9):
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
-
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    c = s_close(df); v = s_volume(df)
-    e20 = ema(c,20); e50 = ema(c,50); e200 = ema(c,200)
-    a = atr(df,14); vw = vwap(df)
-    macd_line, macd_sig, macd_hist = macd(c)
-
-    feats = pd.DataFrame(index=df.index)
-    feats["ret_1"] = c.pct_change(1)
-    feats["ret_3"] = c.pct_change(3)
-    feats["ret_5"] = c.pct_change(5)
-    feats["ema20_slope"] = e20.diff()
-    feats["ema50_slope"] = e50.diff()
-    feats["rsi14"] = rsi(c,14)
-    feats["atr_pct"] = a / c.replace(0,np.nan)
-    feats["macd"] = macd_line
-    feats["macd_hist"] = macd_hist
-    feats["dist_vwap"] = (c - vw) / c.replace(0,np.nan)
-    feats["breakout20"] = c / c.rolling(20).max() - 1.0
-    feats["drawup20"] = c / c.rolling(20).min() - 1.0
-    feats = feats.replace([np.inf,-np.inf], np.nan).dropna()
-    return feats
-
-def standardize(X: np.ndarray):
-    mu = np.nanmean(X, axis=0)
-    sigma = np.nanstd(X, axis=0)
-    sigma = np.where(sigma==0, 1.0, sigma)
-    Xz = (X - mu) / sigma
-    return Xz, mu, sigma
-
-def sigmoid(z):
-    z = np.clip(z, -40, 40)
-    return 1.0/(1.0+np.exp(-z))
-
-def train_logreg_gd(X, y, lr=0.2, epochs=250, l2=1e-4):
-    n, k = X.shape
-    w = np.zeros(k); b = 0.0
-    for _ in range(int(epochs)):
-        z = X @ w + b
-        p = sigmoid(z)
-        grad_w = (X.T @ (p - y))/n + l2*w
-        grad_b = float(np.sum(p - y))/n
-        w -= lr * grad_w
-        b -= lr * grad_b
-    return w, b
-
-def predict_proba(X, w, b):
-    return sigmoid(X @ w + b)
-
-def rule_based_prob(df: pd.DataFrame):
-    c = s_close(df)
-    e20 = ema(c,20); e50=ema(c,50); e200=ema(c,200)
-    a = atr(df,14); vw = vwap(df); r = rsi(c,14)
-    macd_line, macd_sig, macd_hist = macd(c)
-    price = nz(c, 0.0)
-
-    votes = []
-    votes.append(1 if nz(e20,np.nan) > nz(e50,np.nan) > nz(e200,np.nan) else 0)
-    votes.append(1 if nz(macd_hist,0.0) > 0 else 0)
-    rv = nz(r, 50.0)
-    votes.append(1 if 45 <= rv <= 65 else (0 if rv < 35 else 0))  # neutre = 1, extreme = 0
-    votes.append(1 if price >= float(c.tail(20).max()) else 0)
-    votes.append(1 if price >= nz(vw, price) else 0)
-    p = 0.3 + 0.4 * (sum(votes)/len(votes))
-    return float(np.clip(p, 0.25, 0.75))
-
 # ===================== Signals & Backtest helpers =====================
 def compute_opening_range_mask(df: pd.DataFrame, minutes: int = 15) -> pd.Series:
     idx = pd.to_datetime(df.index)
@@ -348,7 +265,7 @@ def pos_size(capital, entry, stop, risk_pct):
 # ===================== Sidebar: data mode =====================
 st.sidebar.header("⚙️ Source de données")
 data_mode = st.sidebar.selectbox("Mode de données", ["real_or_fallback","real_only","fallback_only"], index=0,
-    help="real_or_fallback = Yahoo sinon synthétique; real_only = Yahoo seulement; fallback_only = synthétique.")
+    help="real_or_fallback = Yahoo sinon synthétique; real_only = Yahoo seulement; fallback_only = synthétique.", key="sb_mode")
 st.session_state["data_mode"] = data_mode
 
 # ===================== Tabs =====================
@@ -357,19 +274,19 @@ tab_scr, tab_watch, tab_bt, tab_live, tab_ai, tab_diag = st.tabs(["🔎 Screener
 # -------- Screener --------
 with tab_scr:
     st.subheader("Screener (Actions / Crypto) — scoring multi-facteurs")
-    capital = st.number_input("Capital (pour sizing indicatif)", value=100000.0, step=1000.0)
-    risk_pct = st.number_input("Risque par trade (ex: 0.005 = 0.5%)", value=0.005, step=0.001, format="%.3f")
-    mode = st.radio("Mode", ["Equities (actions)", "Crypto"], horizontal=True)
+    capital = st.number_input("Capital (pour sizing indicatif)", value=100000.0, step=1000.0, key="scr_cap")
+    risk_pct = st.number_input("Risque par trade (ex: 0.005 = 0.5%)", value=0.005, step=0.001, format="%.3f", key="scr_risk")
+    mode = st.radio("Mode", ["Equities (actions)", "Crypto"], horizontal=True, key="scr_mode")
 
     if mode.startswith("Equities"):
         sc = cfg.get("screener_equities", {})
-        symbols = st.multiselect("Tickers (actions)", sc.get("tickers", []), default=sc.get("tickers", []))
-        interval = st.selectbox("Intervalle", ["1d","1h","30m","15m","5m"], index=0)
-        lookback = st.slider("Lookback (jours)", 30, 365, sc.get("lookback_days", 120))
-        topn = st.number_input("Top N", 1, 50, sc.get("top_n", 10))
+        symbols = st.multiselect("Tickers (actions)", sc.get("tickers", []), default=sc.get("tickers", []), key="scr_symbols_eq")
+        interval = st.selectbox("Intervalle", ["1d","1h","30m","15m","5m"], index=0, key="scr_interval_eq")
+        lookback = st.slider("Lookback (jours)", 30, 365, sc.get("lookback_days", 120), key="scr_lookback_eq")
+        topn = st.number_input("Top N", 1, 50, sc.get("top_n", 10), key="scr_topn_eq")
         weights = sc.get("score_weights", {"momentum":0.45,"volatility":0.2,"liquidity":0.2,"trend_quality":0.15})
-        atr_mult_target = st.number_input("ATR × (objectif)", value=float(sc.get("atr_mult_target", 2.5)))
-        run = st.button("Lancer (actions)")
+        atr_mult_target = st.number_input("ATR × (objectif)", value=float(sc.get("atr_mult_target", 2.5)), key="scr_atr_obj_eq")
+        run = st.button("Lancer (actions)", key="scr_run_eq")
         if run and symbols:
             df = pd.DataFrame(build_screener_rows(symbols, interval, lookback, weights, atr_mult_target, is_crypto=False))
             df["rec_stop"], df["rec_size"] = 0.0, 0
@@ -381,17 +298,17 @@ with tab_scr:
                 df.loc[df.index[i], "rec_size"] = pos_size(capital, entry, stop, risk_pct)
             out = df.sort_values("score", ascending=False).head(int(topn))
             st.dataframe(out, use_container_width=True)
-            st.download_button("⬇️ Exporter (CSV)", data=out.to_csv(index=False).encode("utf-8"), file_name="screener_equities.csv", mime="text/csv")
+            st.download_button("⬇️ Exporter (CSV)", data=out.to_csv(index=False).encode("utf-8"), file_name="screener_equities.csv", mime="text/csv", key="scr_dl_eq")
 
     else:
         sc = cfg.get("screener_crypto", {})
-        symbols = st.multiselect("Tickers (crypto)", sc.get("tickers", []), default=sc.get("tickers", []))
-        interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m","5m"], index=0, key="cr_int")
-        lookback = st.slider("Lookback (jours)", 30, 365, sc.get("lookback_days", 120), key="cr_lb")
-        topn = st.number_input("Top N", 1, 50, sc.get("top_n", 10), key="cr_top")
+        symbols = st.multiselect("Tickers (crypto)", sc.get("tickers", []), default=sc.get("tickers", []), key="scr_symbols_cr")
+        interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m","5m"], index=0, key="scr_interval_cr")
+        lookback = st.slider("Lookback (jours)", 30, 365, sc.get("lookback_days", 120), key="scr_lookback_cr")
+        topn = st.number_input("Top N", 1, 50, sc.get("top_n", 10), key="scr_topn_cr")
         weights = sc.get("score_weights", {"momentum":0.55,"volatility":0.25,"liquidity":0.15,"trend_quality":0.05})
-        atr_mult_target = st.number_input("ATR × (objectif)", value=float(sc.get("atr_mult_target", 3.0)), key="cr_atr")
-        run = st.button("Lancer (crypto)", key="cr_run")
+        atr_mult_target = st.number_input("ATR × (objectif)", value=float(sc.get("atr_mult_target", 3.0)), key="scr_atr_obj_cr")
+        run = st.button("Lancer (crypto)", key="scr_run_cr")
         if run and symbols:
             df = pd.DataFrame(build_screener_rows(symbols, interval, lookback, weights, atr_mult_target, is_crypto=True))
             df["rec_stop"], df["rec_size"] = 0.0, 0
@@ -403,17 +320,17 @@ with tab_scr:
                 df.loc[df.index[i], "rec_size"] = pos_size(capital, entry, stop, risk_pct)
             out = df.sort_values("score", ascending=False).head(int(topn))
             st.dataframe(out, use_container_width=True)
-            st.download_button("⬇️ Exporter (CSV)", data=out.to_csv(index=False).encode("utf-8"), file_name="screener_crypto.csv", mime="text/csv")
+            st.download_button("⬇️ Exporter (CSV)", data=out.to_csv(index=False).encode("utf-8"), file_name="screener_crypto.csv", mime="text/csv", key="scr_dl_cr")
 
 # -------- Watchlist --------
 with tab_watch:
     st.subheader("⭐ Watchlist — signaux rapides & alertes")
     wc = cfg.get("watchlist", {})
-    wl_tickers = st.text_area("Liste (séparés par des virgules)", ", ".join(wc.get("tickers", []))).strip()
+    wl_tickers = st.text_area("Liste (séparés par des virgules)", ", ".join(wc.get("tickers", [])), key="watch_list").strip()
     wl_symbols = [s.strip() for s in wl_tickers.split(",") if s.strip()] if wl_tickers else wc.get("tickers", [])
-    wl_interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m"], index=2)
-    wl_lookback = st.slider("Lookback (jours)", 30, 365, wc.get("lookback_days", 90))
-    run_watch = st.button("Mettre à jour watchlist")
+    wl_interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m"], index=2, key="watch_interval")
+    wl_lookback = st.slider("Lookback (jours)", 30, 365, wc.get("lookback_days", 90), key="watch_lookback")
+    run_watch = st.button("Mettre à jour watchlist", key="watch_run")
     if run_watch and wl_symbols:
         cards = []
         logs = {}
@@ -445,23 +362,23 @@ with tab_watch:
         if cards:
             dfw = pd.DataFrame(cards)
             st.dataframe(dfw, use_container_width=True)
-            st.download_button("⬇️ Exporter watchlist (CSV)", data=dfw.to_csv(index=False).encode("utf-8"), file_name="watchlist.csv", mime="text/csv")
+            st.download_button("⬇️ Exporter watchlist (CSV)", data=dfw.to_csv(index=False).encode("utf-8"), file_name="watchlist.csv", mime="text/csv", key="watch_dl")
         st.session_state["yf_logs"] = logs
 
 # -------- Backtest --------
 with tab_bt:
     st.subheader("Backtest ORB + EMA20 + VWAP + Stop ATR")
     bcfg = cfg.get("backtest", {})
-    tickers = st.multiselect("Tickers", bcfg.get("tickers", []), default=bcfg.get("tickers", []))
-    interval = st.selectbox("Intervalle", ["5m","15m","30m","1h"], index=0, key="bt_int")
-    lookback_days = st.slider("Historique (jours)", 5, 30, bcfg.get("lookback_days", 10), key="bt_days")
+    tickers = st.multiselect("Tickers", bcfg.get("tickers", []), default=bcfg.get("tickers", []), key="bt_tickers")
+    interval = st.selectbox("Intervalle", ["5m","15m","30m","1h"], index=0, key="bt_interval")
+    lookback_days = st.slider("Historique (jours)", 5, 30, bcfg.get("lookback_days", 10), key="bt_lookback")
     or_minutes = st.slider("Opening Range (minutes)", 5, 30, bcfg.get("or_minutes", 15), key="bt_or")
     ema_p = st.number_input("EMA period", value=int(bcfg.get("ema_period", 20)), key="bt_ema")
     atr_p = st.number_input("ATR period", value=int(bcfg.get("atr_period", 14)), key="bt_atr")
     atr_mult = st.number_input("ATR × (stop)", value=float(bcfg.get("atr_mult", 2.0)), key="bt_mult")
     allow_short = st.checkbox("Autoriser short", value=bool(bcfg.get("allow_short", True)), key="bt_short")
     end_liq = st.text_input("Liquidation (HH:MM)", bcfg.get("end_liquidate", "15:55"), key="bt_liq")
-    runbt = st.button("Lancer le backtest")
+    runbt = st.button("Lancer le backtest", key="bt_run")
 
     if runbt and tickers:
         summary = []
@@ -515,32 +432,32 @@ with tab_bt:
 with tab_live:
     st.subheader("Live (simulation) — signaux intraday + 🤖 AI")
     st.caption("Aperçu éducatif — aucune exécution réelle.")
-    colA, colB, colC = st.columns([1,1,1])
+    colA, colB, colC = st.columns([1,1,1], key="live_cols1")
     with colA:
-        live_symbol = st.text_input("Ticker", "AAPL")
+        live_symbol = st.text_input("Ticker", "AAPL", key="live_symbol")
     with colB:
-        interval = st.selectbox("Intervalle (intraday)", ["5m","15m","30m"], index=0, key="live_int")
+        interval = st.selectbox("Intervalle (intraday)", ["5m","15m","30m"], index=0, key="live_interval")
     with colC:
-        days = st.slider("Jours à afficher", 1, 5, 1, key="live_days")
+        days = st.slider("Jours à afficher", 1, 5, 1, key="live_days_slider")
 
-    col1, col2, col3 = st.columns([1,1,1])
+    col1, col2, col3 = st.columns([1,1,1], key="live_cols2")
     with col1:
         ema_p = st.number_input("EMA period", value=20, key="live_ema")
     with col2:
         atr_p = st.number_input("ATR period", value=14, key="live_atr")
     with col3:
         atr_mult = st.number_input("ATR × (stop)", value=2.0, key="live_mult")
-    or_minutes = st.slider("Opening Range (min)", 5, 30, 15, key="live_or")
-    allow_short = st.checkbox("Autoriser short", value=True, key="live_short")
+    or_minutes = st.slider("Opening Range (min)", 5, 30, 15, key="live_or_min")
+    allow_short = st.checkbox("Autoriser short", value=True, key="live_short_chk")
 
-    auto = st.checkbox("🔄 Auto-refresh", value=False)
-    every = st.number_input("Toutes les X secondes", min_value=10, max_value=300, value=60, step=5)
+    auto = st.checkbox("🔄 Auto-refresh", value=False, key="live_auto")
+    every = st.number_input("Toutes les X secondes", min_value=10, max_value=300, value=60, step=5, key="live_every")
 
-    runlive = st.button("Actualiser maintenant")
+    runlive = st.button("Actualiser maintenant", key="live_run")
     if runlive or auto:
         df, _, _ = fetch(live_symbol, interval, days, mode=st.session_state.get("data_mode","real_or_fallback"))
         if df.empty:
-            st.warning("Pas de données.")
+            st.warning("Pas de données.", icon="⚠️")
         else:
             sig = generate_signals(df, ema_period=ema_p, atr_period=atr_p, atr_mult=atr_mult, or_minutes=or_minutes, allow_short=allow_short)
             cols = [c for c in ["Close","EMA","VWAP"] if c in sig.columns]
@@ -550,6 +467,87 @@ with tab_live:
                 st.info("Pas assez de points propres pour tracer.")
 
             # —— AI prediction inline ——
+            def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+                d = series.diff()
+                up = d.clip(lower=0); down = -d.clip(upper=0)
+                ma_up = up.ewm(alpha=1/period, adjust=False).mean()
+                ma_down = down.ewm(alpha=1/period, adjust=False).mean()
+                rs = ma_up / ma_down.replace(0, np.nan)
+                return 100 - (100 / (1 + rs))
+
+            def macd(series: pd.Series, fast=12, slow=26, signal=9):
+                ema_fast = series.ewm(span=fast, adjust=False).mean()
+                ema_slow = series.ewm(span=slow, adjust=False).mean()
+                macd_line = ema_fast - ema_slow
+                signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+                hist = macd_line - signal_line
+                return macd_line, signal_line, hist
+
+            def build_features(df: pd.DataFrame) -> pd.DataFrame:
+                c = s_close(df); v = s_volume(df)
+                e20 = ema(c,20); e50 = ema(c,50); e200 = ema(c,200)
+                a = atr(df,14); vw = vwap(df)
+                macd_line, macd_sig, macd_hist = macd(c)
+
+                feats = pd.DataFrame(index=df.index)
+                feats["ret_1"] = c.pct_change(1)
+                feats["ret_3"] = c.pct_change(3)
+                feats["ret_5"] = c.pct_change(5)
+                feats["ema20_slope"] = e20.diff()
+                feats["ema50_slope"] = e50.diff()
+                feats["rsi14"] = rsi(c,14)
+                feats["atr_pct"] = a / c.replace(0,np.nan)
+                feats["macd"] = macd_line
+                feats["macd_hist"] = macd_hist
+                feats["dist_vwap"] = (c - vw) / c.replace(0,np.nan)
+                feats["breakout20"] = c / c.rolling(20).max() - 1.0
+                feats["drawup20"] = c / c.rolling(20).min() - 1.0
+                feats = feats.replace([np.inf,-np.inf], np.nan).dropna()
+                return feats
+
+            def standardize(X: np.ndarray):
+                mu = np.nanmean(X, axis=0)
+                sigma = np.nanstd(X, axis=0)
+                sigma = np.where(sigma==0, 1.0, sigma)
+                Xz = (X - mu) / sigma
+                return Xz, mu, sigma
+
+            def sigmoid(z):
+                z = np.clip(z, -40, 40)
+                return 1.0/(1.0+np.exp(-z))
+
+            def train_logreg_gd(X, y, lr=0.2, epochs=250, l2=1e-4):
+                n, k = X.shape
+                w = np.zeros(k); b = 0.0
+                for _ in range(int(epochs)):
+                    z = X @ w + b
+                    p = sigmoid(z)
+                    grad_w = (X.T @ (p - y))/n + l2*w
+                    grad_b = float(np.sum(p - y))/n
+                    w -= lr * grad_w
+                    b -= lr * grad_b
+                return w, b
+
+            def predict_proba(X, w, b):
+                return sigmoid(X @ w + b)
+
+            def rule_based_prob(df: pd.DataFrame):
+                c = s_close(df)
+                e20 = ema(c,20); e50=ema(c,50); e200=ema(c,200)
+                a = atr(df,14); vw = vwap(df); r = rsi(c,14)
+                macd_line, macd_sig, macd_hist = macd(c)
+                price = nz(c, 0.0)
+
+                votes = []
+                votes.append(1 if nz(e20,np.nan) > nz(e50,np.nan) > nz(e200,np.nan) else 0)
+                votes.append(1 if nz(macd_hist,0.0) > 0 else 0)
+                rv = nz(r, 50.0)
+                votes.append(1 if 45 <= rv <= 65 else (0 if rv < 35 else 0))  # neutre = 1, extreme = 0
+                votes.append(1 if price >= float(c.tail(20).max()) else 0)
+                votes.append(1 if price >= nz(vw, price) else 0)
+                p = 0.3 + 0.4 * (sum(votes)/len(votes))
+                return float(np.clip(p, 0.25, 0.75))
+
             def ai_predict(df, capital=100000.0, risk_pct=0.005, buy_th=0.6, sell_th=0.4):
                 # features & dataset
                 c = s_close(df)
@@ -582,7 +580,7 @@ with tab_live:
                 return p_up, action, entry, stop, size, "logreg"
 
             p_up, action, entry, stop, size, mode_ai = ai_predict(df)
-            colx, coly, colz, colw = st.columns([1,1,1,1])
+            colx, coly, colz, colw = st.columns([1,1,1,1], key="live_metrics")
             colx.metric("P(up) %", f"{p_up*100:.1f}")
             coly.metric("Action", action)
             colz.metric("Entry", f"{entry:.2f}")
@@ -598,18 +596,18 @@ with tab_live:
 with tab_ai:
     st.subheader("🤖 AI Signals — Prévision achat/vente (prochain bar)")
     aicfg = cfg.get("ai", {})
-    ai_tickers = st.text_input("Tickers (séparés par des virgules)", ", ".join(aicfg.get("tickers", []))).strip()
+    ai_tickers = st.text_input("Tickers (séparés par des virgules)", ", ".join(aicfg.get("tickers", [])), key="ai_tickers").strip()
     ai_symbols = [s.strip() for s in ai_tickers.split(",") if s.strip()] if ai_tickers else aicfg.get("tickers", [])
-    ai_interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m","5m"], index=4)
-    ai_lookback = st.slider("Lookback (jours)", 30, 365, aicfg.get("lookback_days", 90))
-    epochs = st.number_input("Epochs (entraînement)", value=int(aicfg.get("train_epochs", 250)), min_value=50, max_value=1000, step=50)
-    lr = st.number_input("Learning rate", value=float(aicfg.get("lr", 0.2)), step=0.05, format="%.2f")
-    l2 = st.number_input("L2 régularisation", value=float(aicfg.get("l2", 1e-4)), step=1e-4, format="%.6f")
-    buy_th = st.number_input("Seuil d'achat (P↑)", value=float(aicfg.get("buy_threshold", 0.6)), min_value=0.5, max_value=0.9, step=0.05)
-    sell_th = st.number_input("Seuil de vente/short (P↑)", value=float(aicfg.get("sell_threshold", 0.4)), min_value=0.1, max_value=0.5, step=0.05)
-    capital = st.number_input("Capital (pour sizing)", value=100000.0, step=1000.0, key="ai_cap")
-    risk_pct = st.number_input("Risque par trade", value=0.005, step=0.001, format="%.3f", key="ai_risk")
-    run_ai = st.button("🧠 Lancer la prédiction")
+    ai_interval = st.selectbox("Intervalle", ["1d","4h","1h","30m","15m","5m"], index=4, key="ai_interval")
+    ai_lookback = st.slider("Lookback (jours)", 30, 365, aicfg.get("lookback_days", 90), key="ai_lookback")
+    epochs = st.number_input("Epochs (entraînement)", value=int(aicfg.get("train_epochs", 250)), min_value=50, max_value=1000, step=50, key="ai_epochs")
+    lr = st.number_input("Learning rate", value=float(aicfg.get("lr", 0.2)), step=0.05, format="%.2f", key="ai_lr")
+    l2 = st.number_input("L2 régularisation", value=float(aicfg.get("l2", 1e-4)), step=1e-4, format="%.6f", key="ai_l2")
+    buy_th = st.number_input("Seuil d'achat (P↑)", value=float(aicfg.get("buy_threshold", 0.6)), min_value=0.5, max_value=0.9, step=0.05, key="ai_buy_th")
+    sell_th = st.number_input("Seuil de vente/short (P↑)", value=float(aicfg.get("sell_threshold", 0.4)), min_value=0.1, max_value=0.5, step=0.05, key="ai_sell_th")
+    capital = st.number_input("Capital (pour sizing)", value=100000.0, step=1000.0, key="ai_capital")
+    risk_pct = st.number_input("Risque par trade", value=0.005, step=0.001, format="%.3f", key="ai_riskpct")
+    run_ai = st.button("🧠 Lancer la prédiction", key="ai_run")
 
     if run_ai and ai_symbols:
         results = []
@@ -617,6 +615,87 @@ with tab_ai:
             df, used_int, log = fetch(sym, ai_interval, ai_lookback, mode=st.session_state.get("data_mode","real_or_fallback"))
             if df is None or df.empty:
                 results.append({"symbol": sym, "status": "vide"}); continue
+
+            def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+                d = series.diff()
+                up = d.clip(lower=0); down = -d.clip(upper=0)
+                ma_up = up.ewm(alpha=1/period, adjust=False).mean()
+                ma_down = down.ewm(alpha=1/period, adjust=False).mean()
+                rs = ma_up / ma_down.replace(0, np.nan)
+                return 100 - (100 / (1 + rs))
+
+            def macd(series: pd.Series, fast=12, slow=26, signal=9):
+                ema_fast = series.ewm(span=fast, adjust=False).mean()
+                ema_slow = series.ewm(span=slow, adjust=False).mean()
+                macd_line = ema_fast - ema_slow
+                signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+                hist = macd_line - signal_line
+                return macd_line, signal_line, hist
+
+            def build_features(df: pd.DataFrame) -> pd.DataFrame:
+                c = s_close(df); v = s_volume(df)
+                e20 = ema(c,20); e50 = ema(c,50); e200 = ema(c,200)
+                a = atr(df,14); vw = vwap(df)
+                macd_line, macd_sig, macd_hist = macd(c)
+
+                feats = pd.DataFrame(index=df.index)
+                feats["ret_1"] = c.pct_change(1)
+                feats["ret_3"] = c.pct_change(3)
+                feats["ret_5"] = c.pct_change(5)
+                feats["ema20_slope"] = e20.diff()
+                feats["ema50_slope"] = e50.diff()
+                feats["rsi14"] = rsi(c,14)
+                feats["atr_pct"] = a / c.replace(0,np.nan)
+                feats["macd"] = macd_line
+                feats["macd_hist"] = macd_hist
+                feats["dist_vwap"] = (c - vw) / c.replace(0,np.nan)
+                feats["breakout20"] = c / c.rolling(20).max() - 1.0
+                feats["drawup20"] = c / c.rolling(20).min() - 1.0
+                feats = feats.replace([np.inf,-np.inf], np.nan).dropna()
+                return feats
+
+            def standardize(X: np.ndarray):
+                mu = np.nanmean(X, axis=0)
+                sigma = np.nanstd(X, axis=0)
+                sigma = np.where(sigma==0, 1.0, sigma)
+                Xz = (X - mu) / sigma
+                return Xz, mu, sigma
+
+            def sigmoid(z):
+                z = np.clip(z, -40, 40)
+                return 1.0/(1.0+np.exp(-z))
+
+            def train_logreg_gd(X, y, lr=0.2, epochs=250, l2=1e-4):
+                n, k = X.shape
+                w = np.zeros(k); b = 0.0
+                for _ in range(int(epochs)):
+                    z = X @ w + b
+                    p = sigmoid(z)
+                    grad_w = (X.T @ (p - y))/n + l2*w
+                    grad_b = float(np.sum(p - y))/n
+                    w -= lr * grad_w
+                    b -= lr * grad_b
+                return w, b
+
+            def predict_proba(X, w, b):
+                return sigmoid(X @ w + b)
+
+            def rule_based_prob(df: pd.DataFrame):
+                c = s_close(df)
+                e20 = ema(c,20); e50=ema(c,50); e200=ema(c,200)
+                a = atr(df,14); vw = vwap(df); r = rsi(c,14)
+                macd_line, macd_sig, macd_hist = macd(c)
+                price = nz(c, 0.0)
+
+                votes = []
+                votes.append(1 if nz(e20,np.nan) > nz(e50,np.nan) > nz(e200,np.nan) else 0)
+                votes.append(1 if nz(macd_hist,0.0) > 0 else 0)
+                rv = nz(r, 50.0)
+                votes.append(1 if 45 <= rv <= 65 else (0 if rv < 35 else 0))  # neutre = 1, extreme = 0
+                votes.append(1 if price >= float(c.tail(20).max()) else 0)
+                votes.append(1 if price >= nz(vw, price) else 0)
+                p = 0.3 + 0.4 * (sum(votes)/len(votes))
+                return float(np.clip(p, 0.25, 0.75))
 
             feats = build_features(df)
             if len(feats) < 60:
@@ -668,4 +747,13 @@ with tab_ai:
 # -------- Diagnostics --------
 with tab_diag:
     st.subheader("🛠️ Astuce & limite Yahoo")
-    st.markdown
+    st.markdown("""
+- Sur des **intervalles fins** (5m, 15m, 30m…), Yahoo limite la période. L’app **baisse automatiquement l’intervalle** si besoin.
+- Barre latérale → **Mode de données** :
+  - `real_or_fallback` : essaye Yahoo, sinon **données synthétiques**
+  - `real_only` : uniquement Yahoo (peut renvoyer vide)
+  - `fallback_only` : uniquement synthétique (utile pour tester l’app hors-ligne)
+- L’onglet **🤖 AI Signals** et le **Live** utilisent un petit modèle de régression logistique (numpy) pour estimer **P(up)** au prochain bar. 
+  - Si l’historique est trop court, un **mode règles** calcule une proba simple basée sur EMA/RSI/MACD/Breakout.
+  - Utilise une gestion du risque stricte. Ceci n’est **pas** un conseil d’investissement.
+""")
